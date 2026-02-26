@@ -69,7 +69,7 @@ namespace Universal_Data_Converter
             _fileWriterService = new FileWriterService();
             _typeDetectionService = new TypeDetectionService();
             _separatorDetector = new SeparatorDetector();
-            _converterService = new DataConverterService(); // Agora deve funcionar
+            _converterService = new DataConverterService();
 
             // Registrar eventos do conversor
             if (_converterService != null)
@@ -79,12 +79,37 @@ namespace Universal_Data_Converter
                 _converterService.ConversionFailed += OnConversionFailed;
             }
 
+            // CARREGAR ÍCONE AQUI (no construtor, não no RegisterEventHandlers)
+            LoadApplicationIcon();
+
             SetupUI();
             RegisterEventHandlers();
         }
 
+        private void LoadApplicationIcon()
+        {
+            try
+            {
+
+                this.Icon = new Icon("icon.ico");
+                Log($"Ícone carregado: icon.ico");
+                return;
+
+                // Se não encontrar, usar ícone padrão do Windows
+                this.Icon = SystemIcons.Application;
+                Log("Ícone padrão usado (arquivo icon.ico não encontrado)");
+            }
+            catch (Exception ex)
+            {
+                Log($"Erro ao carregar ícone: {ex.Message}", "error");
+                // Fallback para ícone padrão
+                this.Icon = SystemIcons.Application;
+            }
+        }
+
         private void RegisterEventHandlers()
         {
+            // Remova a linha do ícone daqui
             this.Load += (s, e) => Log("Application started. Ready to convert files.");
         }
 
@@ -125,6 +150,7 @@ namespace Universal_Data_Converter
 
             // ===== NOVO: Opções Gerais (deve vir ANTES do Output Section) =====
             var generalOptionsPanel = CreateGeneralOptionsSection();
+            generalOptionsPanel.Width = 500; // Define a largura do panel pai
             mainPanel.Controls.Add(generalOptionsPanel);
 
             // Output Section
@@ -172,7 +198,8 @@ namespace Universal_Data_Converter
                 AutoSize = false,
                 TextAlign = ContentAlignment.MiddleCenter,
                 Height = 40,
-                Dock = DockStyle.Top
+                Dock = DockStyle.Top,
+                
             };
 
             var lblSubtitle = new Label
