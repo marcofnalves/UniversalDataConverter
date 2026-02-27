@@ -24,7 +24,6 @@ namespace Universal_Data_Converter.Services.Sql
 
             var analysis = _analyzer.Analyze(dt);
 
-            // Garantir que o diretório de saída existe
             var outputDir = Path.GetDirectoryName(options.OutputFile);
             if (!string.IsNullOrEmpty(outputDir) && !Directory.Exists(outputDir))
             {
@@ -74,14 +73,12 @@ namespace Universal_Data_Converter.Services.Sql
 
                 var columnDefinition = $"  `{columnName}` {sqlType} {nullable}";
 
-                // Adicionar DEFAULT se existir
                 var defaultValue = GetDefaultValue(col);
                 if (!string.IsNullOrEmpty(defaultValue))
                 {
                     columnDefinition += $" DEFAULT {defaultValue}";
                 }
 
-                // Adicionar AUTO_INCREMENT para colunas de identidade
                 if (analysis.IdentityColumns.Contains(col.ColumnName) || col.AutoIncrement)
                 {
                     columnDefinition += " AUTO_INCREMENT";
@@ -90,7 +87,6 @@ namespace Universal_Data_Converter.Services.Sql
                 columnDefinitions.Add(columnDefinition);
             }
 
-            // Adicionar chave primária (se houver)
             if (analysis.PrimaryKeyColumns.Any())
             {
                 var pkColumns = analysis.PrimaryKeyColumns.Select(c => $"`{SanitizeIdentifier(c)}`");
@@ -98,8 +94,6 @@ namespace Universal_Data_Converter.Services.Sql
             }
 
             await writer.WriteLineAsync(string.Join(",\n", columnDefinitions));
-
-            // Adicionar opções da tabela
             await writer.WriteLineAsync($") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;");
             await writer.WriteLineAsync();
         }
@@ -116,7 +110,6 @@ namespace Universal_Data_Converter.Services.Sql
             var insertHeader = $"INSERT INTO `{SanitizeIdentifier(options.SqlTableName)}` ({string.Join(", ", columns)}) VALUES";
             await writer.WriteLineAsync(insertHeader);
 
-            // Processar em lotes para melhor performance
             var batchSize = 100;
             var valuesBatch = new List<string>();
 
@@ -133,7 +126,6 @@ namespace Universal_Data_Converter.Services.Sql
 
                 valuesBatch.Add($"({string.Join(", ", rowValues)})");
 
-                // Escrever em lotes para evitar memória excessiva
                 if (valuesBatch.Count >= batchSize || i == dt.Rows.Count - 1)
                 {
                     var separator = (i == dt.Rows.Count - 1) ? ";" : ",";
@@ -147,16 +139,23 @@ namespace Universal_Data_Converter.Services.Sql
 
         private async Task WriteIndexesAsync(StreamWriter writer, DataTable dt, TableAnalysis analysis, ConversionOptions options)
         {
-            // Conjunto para rastrear índices já criados (evitar duplicatas)
             var createdIndexes = new HashSet<string>();
+            var actualUniqueColumns = new List<string>();
 
-            // 1. Primeiro, criar índices únicos APENAS para colunas que realmente podem ser únicas
+            // Verificar quais colunas realmente têm valores únicos
             foreach (var uniqueCol in analysis.UniqueColumns)
             {
-                // Verificar se não é uma PK (PK já é um índice)
+                if (HasColumnUniqueValues(dt, uniqueCol))
+                {
+                    actualUniqueColumns.Add(uniqueCol);
+                }
+            }
+
+            // Criar índices únicos
+            foreach (var uniqueCol in actualUniqueColumns)
+            {
                 if (!analysis.PrimaryKeyColumns.Contains(uniqueCol))
                 {
-                    // Verificar se a coluna pode ter índice único (não deve ser TEXT longa)
                     if (CanHaveUniqueIndex(dt, uniqueCol))
                     {
                         var indexName = $"idx_unique_{SanitizeIdentifier(uniqueCol)}";
@@ -167,30 +166,17 @@ namespace Universal_Data_Converter.Services.Sql
                             createdIndexes.Add(indexName);
                         }
                     }
-                    else
-                    {
-                        // Se não pode ser única, criar apenas um índice normal
-                        await writer.WriteLineAsync($"-- Warning: Column `{uniqueCol}` marked as unique but contains non-unique or long text data. Creating regular index instead.");
-                        var indexName = $"idx_{SanitizeIdentifier(uniqueCol)}";
-                        if (!createdIndexes.Contains(indexName))
-                        {
-                            await writer.WriteLineAsync($"CREATE INDEX `{indexName}` ON `{SanitizeIdentifier(options.SqlTableName)}` (`{SanitizeIdentifier(uniqueCol)}`(255));");
-                            createdIndexes.Add(indexName);
-                        }
-                    }
                 }
             }
 
-            // 2. Criar índices sugeridos (apenas para colunas que ainda não têm índice)
+            // Criar índices sugeridos
             foreach (var indexCol in analysis.SuggestedIndexes)
             {
-                // Verificar se já não é uma PK ou já tem índice único
-                if (!analysis.PrimaryKeyColumns.Contains(indexCol) && !analysis.UniqueColumns.Contains(indexCol))
+                if (!analysis.PrimaryKeyColumns.Contains(indexCol) && !actualUniqueColumns.Contains(indexCol))
                 {
                     var indexName = $"idx_{SanitizeIdentifier(indexCol)}";
                     if (!createdIndexes.Contains(indexName))
                     {
-                        // Verificar o tipo de dados para decidir se precisa de prefixo
                         if (NeedsPrefixIndex(dt, indexCol))
                         {
                             await writer.WriteLineAsync($"-- Creating index on `{SanitizeIdentifier(indexCol)}` (first 255 chars)");
@@ -215,35 +201,91 @@ namespace Universal_Data_Converter.Services.Sql
             await writer.WriteLineAsync("SET UNIQUE_CHECKS = 1;");
         }
 
+        // MÉTODO CORRIGIDO - O mais importante!
+        private string FormatMySqlValue(object? value, Type dataType)
+        {
+            if (value == null || value == DBNull.Value)
+                return "NULL";
+
+            // Tratamento especial para strings
+            if (dataType == typeof(string) || dataType == typeof(char))
+            {
+                string? stringValue = value.ToString();
+                if (stringValue == null)
+                    return "NULL";
+
+                // PASSO 1: Escapar barras invertidas
+                string escaped = stringValue.Replace("\\", "\\\\");
+
+                // PASSO 2: DUPLICAR aspas simples (NÃO usar barra invertida)
+                // Isso converte ' -> '' que é o padrão SQL
+                escaped = escaped.Replace("'", "''");
+
+                return $"'{escaped}'";
+            }
+
+            if (dataType == typeof(DateTime))
+            {
+                var date = (DateTime)value;
+                return $"'{date:yyyy-MM-dd HH:mm:ss}'";
+            }
+
+            if (dataType == typeof(bool))
+                return (bool)value ? "1" : "0";
+
+            if (dataType == typeof(byte[]))
+            {
+                var bytes = (byte[])value;
+                return bytes.Length > 0 ? $"0x{BitConverter.ToString(bytes).Replace("-", "")}" : "NULL";
+            }
+
+            if (dataType == typeof(Guid))
+                return $"'{value}'";
+
+            if (dataType == typeof(decimal) || dataType == typeof(double) || dataType == typeof(float))
+            {
+                string? numberValue = value.ToString();
+                return numberValue?.Replace(",", ".") ?? "NULL";
+            }
+
+            return value.ToString() ?? "NULL";
+        }
+
+        // Método auxiliar para verificar valores únicos
+        private bool HasColumnUniqueValues(DataTable dt, string columnName)
+        {
+            var col = dt.Columns[columnName];
+            if (col == null) return false;
+
+            var values = new HashSet<string>();
+
+            foreach (DataRow row in dt.Rows)
+            {
+                var value = row[columnName]?.ToString() ?? "";
+                if (values.Contains(value))
+                    return false;
+                values.Add(value);
+            }
+
+            return true;
+        }
+
         private bool CanHaveUniqueIndex(DataTable dt, string columnName)
         {
             var col = dt.Columns[columnName];
             if (col == null) return false;
 
-            // Colunas não-string podem ter índice único
             if (col.DataType != typeof(string) && col.DataType != typeof(char))
                 return true;
 
-            // Para colunas string, verificar se todos os valores são únicos e não muito longos
-            var values = new HashSet<string>();
             var maxLength = 0;
-
             foreach (DataRow row in dt.Rows)
             {
                 var value = row[columnName]?.ToString() ?? "";
-
                 if (value.Length > maxLength)
                     maxLength = value.Length;
-
-                // Se encontrar duplicata, não pode ser única
-                if (values.Contains(value))
-                    return false;
-
-                values.Add(value);
             }
 
-            // MySQL tem limite de 3072 bytes para índices únicos em InnoDB
-            // 255 caracteres é um limite seguro para UTF8MB4
             return maxLength <= 255;
         }
 
@@ -252,7 +294,6 @@ namespace Universal_Data_Converter.Services.Sql
             var col = dt.Columns[columnName];
             if (col == null) return false;
 
-            // Apenas colunas string precisam de prefixo se forem muito longas
             if (col.DataType != typeof(string) && col.DataType != typeof(char))
                 return false;
 
@@ -264,16 +305,13 @@ namespace Universal_Data_Converter.Services.Sql
                     maxLength = value.Length;
             }
 
-            // Se o comprimento máximo for maior que 255, precisa de prefixo
             return maxLength > 255;
         }
 
         private string MapToMySqlType(Type dataType, string columnName, DataTable dt)
         {
-            // Mapear tipos .NET para tipos MySQL apropriados
             if (dataType == typeof(string) || dataType == typeof(char))
             {
-                // Verificar o comprimento máximo da coluna para decidir entre VARCHAR e TEXT
                 var maxLength = 0;
                 foreach (DataRow row in dt.Rows)
                 {
@@ -317,77 +355,19 @@ namespace Universal_Data_Converter.Services.Sql
             return FormatMySqlValue(column.DefaultValue, column.DataType);
         }
 
-        private string FormatMySqlValue(object? value, Type dataType)
-        {
-            if (value == null || value == DBNull.Value)
-                return "NULL";
-
-            if (dataType == typeof(string) || dataType == typeof(char))
-            {
-                string? stringValue = value.ToString();
-                return stringValue != null ? $"'{EscapeMySqlString(stringValue)}'" : "NULL";
-            }
-
-            if (dataType == typeof(DateTime))
-            {
-                var date = (DateTime)value;
-                return $"'{date:yyyy-MM-dd HH:mm:ss}'";
-            }
-
-            if (dataType == typeof(bool))
-                return (bool)value ? "1" : "0";
-
-            if (dataType == typeof(byte[]))
-            {
-                var bytes = (byte[])value;
-                return bytes.Length > 0 ? $"0x{BitConverter.ToString(bytes).Replace("-", "")}" : "NULL";
-            }
-
-            if (dataType == typeof(Guid))
-                return $"'{value}'";
-
-            if (dataType == typeof(decimal) || dataType == typeof(double) || dataType == typeof(float))
-            {
-                string? numberValue = value.ToString();
-                return numberValue?.Replace(",", ".") ?? "NULL";
-            }
-
-            // Números inteiros e outros tipos
-            return value.ToString() ?? "NULL";
-        }
-
-        private string EscapeMySqlString(string? input)
-        {
-            if (string.IsNullOrEmpty(input))
-                return string.Empty;
-
-            return input
-                .Replace("\\", "\\\\")
-                .Replace("'", "\\'")
-                .Replace("\"", "\\\"")
-                .Replace("\0", "\\0")
-                .Replace("\n", "\\n")
-                .Replace("\r", "\\r")
-                .Replace("\t", "\\t")
-                .Replace("\x1a", "\\Z");
-        }
-
         private string SanitizeIdentifier(string? identifier)
         {
             if (string.IsNullOrEmpty(identifier))
                 return "column";
 
-            // Remover caracteres inválidos para identificadores MySQL
             var invalidChars = new[] { '`', '\'', '"', ';', ' ', '-', '.', '/' };
             foreach (var c in invalidChars)
             {
                 identifier = identifier.Replace(c.ToString(), "_");
             }
 
-            // Remover caracteres não-ASCII
             identifier = Regex.Replace(identifier, @"[^\w@#\$]", "_");
 
-            // Garantir que não começa com número
             if (identifier.Length > 0 && char.IsDigit(identifier[0]))
                 identifier = "_" + identifier;
 
