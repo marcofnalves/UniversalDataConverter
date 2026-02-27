@@ -9,6 +9,7 @@ using CsvHelper.Configuration;
 using ExcelDataReader;
 using Newtonsoft.Json;
 using Universal_Data_Converter.Models;
+using Universal_Data_Converter.Services.Readers;
 using Universal_Data_Converter.Utils;
 
 namespace Universal_Data_Converter.Services
@@ -30,28 +31,20 @@ namespace Universal_Data_Converter.Services
 
             try
             {
-                if (options.InputFile.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                var extension = Path.GetExtension(options.InputFile).ToLowerInvariant();
+
+                return extension switch
                 {
-                    return LoadJsonSample(options.InputFile, options.SampleSize, encoding);
-                }
-                else if (options.InputFile.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase) ||
-                         options.InputFile.EndsWith(".xls", StringComparison.OrdinalIgnoreCase))
-                {
-                    return LoadExcelSample(options.InputFile, options.SampleSize);
-                }
-                else if (options.InputFile.EndsWith(".parquet", StringComparison.OrdinalIgnoreCase))
-                {
-                    // Implementação simplificada - Parquet exigiria biblioteca específica
-                    return new DataTable();
-                }
-                else
-                {
-                    return LoadCsvSample(options, encoding);
-                }
+                    ".json" => LoadJsonSample(options.InputFile, options.SampleSize, encoding),
+                    ".xlsx" or ".xls" => LoadExcelSample(options.InputFile, options.SampleSize),
+                    ".xml" => LoadXmlSample(options.InputFile, options.SampleSize),
+                    ".parquet" => new DataTable(), // Implementação simplificada
+                    _ => LoadCsvSample(options, encoding)
+                };
             }
             catch (Exception ex)
             {
-                throw new Exception($"Error loading data: {ex.Message}", ex);
+                throw new Exception($"Error loading data from {options.InputFile}: {ex.Message}", ex);
             }
         }
 
@@ -64,30 +57,24 @@ namespace Universal_Data_Converter.Services
 
             try
             {
-                if (options.InputFile.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                var extension = Path.GetExtension(options.InputFile).ToLowerInvariant();
+
+                return extension switch
                 {
-                    return LoadJsonFull(options.InputFile, encoding);
-                }
-                else if (options.InputFile.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase) ||
-                         options.InputFile.EndsWith(".xls", StringComparison.OrdinalIgnoreCase))
-                {
-                    return LoadExcelFull(options.InputFile);
-                }
-                else if (options.InputFile.EndsWith(".parquet", StringComparison.OrdinalIgnoreCase))
-                {
-                    return new DataTable();
-                }
-                else
-                {
-                    return LoadCsvFull(options, encoding);
-                }
+                    ".json" => LoadJsonFull(options.InputFile, encoding),
+                    ".xlsx" or ".xls" => LoadExcelFull(options.InputFile),
+                    ".xml" => LoadXmlFull(options.InputFile),
+                    ".parquet" => new DataTable(), // Implementação simplificada
+                    _ => LoadCsvFull(options, encoding)
+                };
             }
             catch (Exception ex)
             {
-                throw new Exception($"Error loading data: {ex.Message}", ex);
+                throw new Exception($"Error loading data from {options.InputFile}: {ex.Message}", ex);
             }
         }
 
+        // Métodos existentes (mantidos iguais)
         private DataTable? LoadJsonSample(string filePath, int sampleSize, Encoding encoding)
         {
             var json = File.ReadAllText(filePath, encoding);
@@ -181,6 +168,33 @@ namespace Universal_Data_Converter.Services
             }
 
             return new DataTable();
+        }
+
+        // NOVOS MÉTODOS PARA XML
+        private DataTable? LoadXmlSample(string filePath, int sampleSize)
+        {
+            return XmlReaderHelper.ReadXmlSample(filePath, sampleSize);
+        }
+
+        private DataTable? LoadXmlFull(string filePath)
+        {
+            return XmlReaderHelper.ReadXmlFull(filePath);
+        }
+
+        // Método adicional para extrair metadados inteligentes do XML
+        public XmlMetadata? ExtractXmlMetadata(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath) || !filePath.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            try
+            {
+                return XmlReaderHelper.ExtractMetadata(filePath);
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Error extracting XML metadata: {ex.Message}", ex);
+            }
         }
 
         private DataTable? LoadCsvSample(ConversionOptions options, Encoding encoding)
